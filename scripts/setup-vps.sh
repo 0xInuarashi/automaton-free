@@ -117,6 +117,15 @@ else
   fi
 fi
 
+# Re-source nvm into the current shell to ensure the right node is in PATH
+# (nvm use inside a function may not persist reliably without this)
+NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$NVM_DIR/nvm.sh"
+  nvm use 22 2>/dev/null || nvm use default 2>/dev/null || true
+fi
+
 # Re-check after potential nvm install
 NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))" 2>/dev/null) \
   || die "Node.js still not available after install. Open a new shell and re-run this script."
@@ -185,6 +194,9 @@ section "Building"
 
 info "Installing dependencies..."
 pnpm install --frozen-lockfile
+
+info "Rebuilding native addons for Node.js $(node -v)..."
+pnpm rebuild
 
 info "Building TypeScript..."
 pnpm run build
