@@ -49,6 +49,7 @@ import { ulid } from "ulid";
 import { ModelRegistry } from "../inference/registry.js";
 import { InferenceBudgetTracker } from "../inference/budget.js";
 import { InferenceRouter } from "../inference/router.js";
+import { STATIC_MODEL_BASELINE } from "../inference/types.js";
 import { MemoryRetriever } from "../memory/retrieval.js";
 import { MemoryIngestionPipeline } from "../memory/ingestion.js";
 import { DEFAULT_MEMORY_BUDGET } from "../types.js";
@@ -128,9 +129,33 @@ export async function runAgentLoop(
   // Detect if free inference models are available (e.g. OpenRouter free tier).
   // When free models cover all task types, credit-based survival tier gating is
   // irrelevant — the agent can operate indefinitely without Conway credits.
-  const freeModelsAvailable = modelRegistry.getAvailable().some(
-    (m) => m.enabled && m.costPer1kInput === 0 && m.costPer1kOutput === 0,
-  );
+  //
+  // Primary: check DB registry. Fallback: check static baseline directly.
+  // The fallback handles edge cases where DB queries return unexpected results
+  // (e.g. fresh migrations, WAL visibility, type coercion issues).
+  let freeModelsAvailable = false;
+  try {
+    const availableModels = modelRegistry.getAvailable();
+    freeModelsAvailable = availableModels.some(
+      (m) => m.enabled && m.costPer1kInput === 0 && m.costPer1kOutput === 0,
+    );
+    const freeCount = availableModels.filter(
+      (m) => m.enabled && m.costPer1kInput === 0 && m.costPer1kOutput === 0,
+    ).length;
+    logger.info(`Model registry: ${availableModels.length} available, ${freeCount} free (freeModelsAvailable=${freeModelsAvailable})`);
+  } catch (err: any) {
+    logger.warn(`Model registry query failed: ${err.message}`);
+  }
+  // Static fallback: if DB check missed free models, check the compiled-in baseline.
+  if (!freeModelsAvailable) {
+    const baselineFree = STATIC_MODEL_BASELINE.some(
+      (m) => m.enabled && m.costPer1kInput === 0 && m.costPer1kOutput === 0,
+    );
+    if (baselineFree) {
+      logger.info("Free models detected from static baseline (DB check returned false)");
+      freeModelsAvailable = true;
+    }
+  }
 
   // Optional orchestration bootstrap (requires V9 goals/task tables)
   let planModeController: PlanModeController | undefined;

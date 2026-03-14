@@ -227,36 +227,38 @@ describe("InferenceRouter", () => {
     it("returns correct model for normal/agent_turn", () => {
       const model = router.selectModel("normal", "agent_turn");
       expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5.2");
+      expect(model!.modelId).toBe("openrouter/hunter-alpha");
     });
 
     it("returns cheaper model for low_compute tier", () => {
       const model = router.selectModel("low_compute", "agent_turn");
       expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      expect(model!.modelId).toBe("stepfun/step-3.5-flash:free");
     });
 
     it("returns minimal model for critical tier", () => {
       const model = router.selectModel("critical", "agent_turn");
       expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      expect(model!.modelId).toBe("stepfun/step-3.5-flash:free");
     });
 
-    it("returns null for dead tier", () => {
+    it("returns free model for dead tier", () => {
       const model = router.selectModel("dead", "agent_turn");
-      expect(model).toBeNull();
+      expect(model).not.toBeNull();
+      expect(model!.modelId).toBe("arcee-ai/trinity-large-preview:free");
     });
 
-    it("returns null for critical tier with non-essential task", () => {
+    it("returns free model for critical tier with summarization", () => {
       const model = router.selectModel("critical", "summarization");
-      expect(model).toBeNull();
+      expect(model).not.toBeNull();
+      expect(model!.modelId).toBe("stepfun/step-3.5-flash:free");
     });
 
     it("skips disabled models and picks next candidate", () => {
-      registry.setEnabled("gpt-5.2", false);
+      registry.setEnabled("openrouter/hunter-alpha", false);
       const model = router.selectModel("normal", "agent_turn");
       expect(model).not.toBeNull();
-      expect(model!.modelId).toBe("gpt-5-mini");
+      expect(model!.modelId).toBe("stepfun/step-3.5-flash:free");
     });
   });
 
@@ -279,18 +281,18 @@ describe("InferenceRouter", () => {
       );
 
       expect(result.content).toBe("Hello!");
-      expect(result.model).toBe("gpt-5.2");
+      expect(result.model).toBe("openrouter/hunter-alpha");
       expect(result.finishReason).toBe("stop");
 
       // Verify cost was recorded
       const costs = inferenceGetSessionCosts(db, "test-session");
       expect(costs.length).toBe(1);
-      expect(costs[0].model).toBe("gpt-5.2");
+      expect(costs[0].model).toBe("openrouter/hunter-alpha");
     });
 
     it("computes actualCostCents accurately from token usage", async () => {
-      // gpt-5.2 has costPer1kInput=20, costPer1kOutput=80 (hundredths of cents)
-      // Formula: Math.ceil((input/1000)*costPer1kInput/100 + (output/1000)*costPer1kOutput/100)
+      // Free models (openrouter/hunter-alpha) have costPer1kInput=0, costPer1kOutput=0
+      // So cost is always 0 for free models
       const mockChat = async (_msgs: any[], _opts: any) => ({
         message: { content: "result", role: "assistant" },
         usage: { promptTokens: 1000, completionTokens: 500 },
@@ -307,23 +309,32 @@ describe("InferenceRouter", () => {
         mockChat,
       );
 
-      // Verify cost is computed correctly
-      // (1000/1000)*300/100 + (500/1000)*1500/100 = 3 + 7.5 = 10.5 => ceil = 11
-      expect(result.costCents).toBeGreaterThan(0);
+      // Free models: cost is 0
+      expect(result.costCents).toBe(0);
       expect(typeof result.costCents).toBe("number");
-      expect(Number.isInteger(result.costCents)).toBe(true);
 
       // Verify the recorded cost matches
       const costs = inferenceGetSessionCosts(db, "cost-accuracy-session");
       expect(costs.length).toBe(1);
-      expect(costs[0].costCents).toBe(result.costCents);
+      expect(costs[0].costCents).toBe(0);
       expect(costs[0].inputTokens).toBe(1000);
       expect(costs[0].outputTokens).toBe(500);
     });
 
-    it("returns error when budget is exhausted", async () => {
+    it("returns error when budget is exhausted for paid models", async () => {
+      // Free models always pass budget — test with a paid model only
+      // Disable all free models to force selection of paid ones
+      registry.setEnabled("openrouter/hunter-alpha", false);
+      registry.setEnabled("stepfun/step-3.5-flash:free", false);
+      registry.setEnabled("arcee-ai/trinity-large-preview:free", false);
+      registry.setEnabled("nvidia/nemotron-3-super-120b-a12b:free", false);
+
       const strictBudget = new InferenceBudgetTracker(db, {
         ...DEFAULT_MODEL_STRATEGY_CONFIG,
+        // Override strategy to use paid models
+        inferenceModel: "gpt-4.1",
+        lowComputeModel: "gpt-4.1-mini",
+        criticalModel: "gpt-4.1-nano",
         perCallCeilingCents: 1, // Very low ceiling
       });
       const strictRouter = new InferenceRouter(db, registry, strictBudget);
@@ -344,9 +355,18 @@ describe("InferenceRouter", () => {
       expect(result.finishReason).toBe("budget_exceeded");
     });
 
-    it("enforces session budget when configured", async () => {
+    it("enforces session budget when configured for paid models", async () => {
+      // Disable all free models to force paid model selection
+      registry.setEnabled("openrouter/hunter-alpha", false);
+      registry.setEnabled("stepfun/step-3.5-flash:free", false);
+      registry.setEnabled("arcee-ai/trinity-large-preview:free", false);
+      registry.setEnabled("nvidia/nemotron-3-super-120b-a12b:free", false);
+
       const sessionBudget = new InferenceBudgetTracker(db, {
         ...DEFAULT_MODEL_STRATEGY_CONFIG,
+        inferenceModel: "gpt-4.1",
+        lowComputeModel: "gpt-4.1-mini",
+        criticalModel: "gpt-4.1-nano",
         sessionBudgetCents: 5,
       });
       const sessionRouter = new InferenceRouter(db, registry, sessionBudget);
@@ -412,7 +432,7 @@ describe("InferenceRouter", () => {
       expect(receivedSignal).toBeInstanceOf(AbortSignal);
     });
 
-    it("returns empty result for dead tier", async () => {
+    it("routes dead tier to free model", async () => {
       const result = await router.route(
         {
           messages: [{ role: "user", content: "Hi" }],
@@ -420,11 +440,12 @@ describe("InferenceRouter", () => {
           tier: "dead",
           sessionId: "test-session",
         },
-        async () => ({ message: { content: "" }, usage: {}, finishReason: "stop" }),
+        async () => ({ message: { content: "alive" }, usage: { promptTokens: 10, completionTokens: 5 }, finishReason: "stop" }),
       );
 
-      expect(result.model).toBe("none");
-      expect(result.finishReason).toBe("error");
+      expect(result.model).toBe("arcee-ai/trinity-large-preview:free");
+      expect(result.finishReason).toBe("stop");
+      expect(result.content).toBe("alive");
     });
   });
 
@@ -685,11 +706,12 @@ describe("Routing Matrix", () => {
     }
   });
 
-  it("dead tier has empty candidates for all task types", () => {
-    const taskTypes = ["agent_turn", "heartbeat_triage", "safety_check", "summarization", "planning"] as const;
-    for (const taskType of taskTypes) {
-      expect(DEFAULT_ROUTING_MATRIX.dead[taskType].candidates).toHaveLength(0);
-    }
+  it("dead tier has free model candidates for essential tasks", () => {
+    expect(DEFAULT_ROUTING_MATRIX.dead.agent_turn.candidates.length).toBeGreaterThan(0);
+    expect(DEFAULT_ROUTING_MATRIX.dead.heartbeat_triage.candidates.length).toBeGreaterThan(0);
+    expect(DEFAULT_ROUTING_MATRIX.dead.safety_check.candidates.length).toBeGreaterThan(0);
+    // Planning disabled in dead tier
+    expect(DEFAULT_ROUTING_MATRIX.dead.planning.candidates).toHaveLength(0);
   });
 
   it("normal tier has candidates for all task types", () => {
@@ -699,13 +721,11 @@ describe("Routing Matrix", () => {
     }
   });
 
-  it("critical tier only has candidates for essential task types", () => {
-    expect(DEFAULT_ROUTING_MATRIX.critical.agent_turn.candidates.length).toBeGreaterThan(0);
-    expect(DEFAULT_ROUTING_MATRIX.critical.heartbeat_triage.candidates.length).toBeGreaterThan(0);
-    expect(DEFAULT_ROUTING_MATRIX.critical.safety_check.candidates.length).toBeGreaterThan(0);
-    // Non-essential tasks should have no candidates
-    expect(DEFAULT_ROUTING_MATRIX.critical.summarization.candidates).toHaveLength(0);
-    expect(DEFAULT_ROUTING_MATRIX.critical.planning.candidates).toHaveLength(0);
+  it("critical tier has free model candidates for all task types", () => {
+    const taskTypes = ["agent_turn", "heartbeat_triage", "safety_check", "summarization", "planning"] as const;
+    for (const taskType of taskTypes) {
+      expect(DEFAULT_ROUTING_MATRIX.critical[taskType].candidates.length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -965,9 +985,9 @@ describe("Inference DB Helpers", () => {
 
 describe("DEFAULT_MODEL_STRATEGY_CONFIG", () => {
   it("has sensible defaults", () => {
-    expect(DEFAULT_MODEL_STRATEGY_CONFIG.inferenceModel).toBe("gpt-5.2");
-    expect(DEFAULT_MODEL_STRATEGY_CONFIG.lowComputeModel).toBe("gpt-5-mini");
-    expect(DEFAULT_MODEL_STRATEGY_CONFIG.criticalModel).toBe("gpt-5-mini");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.inferenceModel).toBe("openrouter/hunter-alpha");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.lowComputeModel).toBe("stepfun/step-3.5-flash:free");
+    expect(DEFAULT_MODEL_STRATEGY_CONFIG.criticalModel).toBe("arcee-ai/trinity-large-preview:free");
     expect(DEFAULT_MODEL_STRATEGY_CONFIG.enableModelFallback).toBe(true);
     expect(DEFAULT_MODEL_STRATEGY_CONFIG.hourlyBudgetCents).toBe(0); // no limit
     expect(DEFAULT_MODEL_STRATEGY_CONFIG.sessionBudgetCents).toBe(0); // no limit

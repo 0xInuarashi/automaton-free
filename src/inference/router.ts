@@ -50,6 +50,7 @@ export class InferenceRouter {
     // 1. Get all candidate models for this tier + task
     const candidates = this.selectCandidates(tier, taskType);
     if (candidates.length === 0) {
+      logger.warn(`No candidates for tier=${tier} task=${taskType}. Registry has ${this.registry.getAvailable().length} available models.`);
       return {
         content: "",
         model: "none",
@@ -65,6 +66,8 @@ export class InferenceRouter {
 
     // Try each candidate model; fall back on provider errors (4xx/5xx)
     let lastError: Error | null = null;
+    let budgetRejections = 0;
+    let sessionBudgetRejections = 0;
     for (const model of candidates) {
 
     // 2. Estimate cost and check budget
@@ -76,6 +79,8 @@ export class InferenceRouter {
 
     const budgetCheck = this.budget.checkBudget(estimatedCostCents, model.modelId);
     if (!budgetCheck.allowed) {
+      logger.info(`Budget rejected ${model.modelId}: ${budgetCheck.reason}`);
+      budgetRejections++;
       continue; // Try next candidate
     }
 
@@ -83,6 +88,7 @@ export class InferenceRouter {
     if (request.sessionId && this.budget.config.sessionBudgetCents > 0) {
       const sessionCost = this.budget.getSessionCost(request.sessionId);
       if (sessionCost + estimatedCostCents > this.budget.config.sessionBudgetCents) {
+        sessionBudgetRejections++;
         continue; // Try next candidate
       }
     }
@@ -173,8 +179,27 @@ export class InferenceRouter {
     } // end candidate loop
 
     // All candidates exhausted
+    logger.warn(`All ${candidates.length} candidates exhausted for tier=${tier} task=${taskType}: ${candidates.map(c => c.modelId).join(", ")} (budget=${budgetRejections}, session=${sessionBudgetRejections})`);
     if (lastError) {
       throw lastError;
+    }
+
+    // Distinguish budget exhaustion from other failures
+    const allBudgetRejected = budgetRejections + sessionBudgetRejections === candidates.length;
+    if (allBudgetRejected) {
+      const reason = sessionBudgetRejections > 0
+        ? "Session budget exceeded"
+        : "Per-call budget exceeded for all candidates";
+      return {
+        content: reason,
+        model: "none",
+        provider: "other",
+        inputTokens: 0,
+        outputTokens: 0,
+        costCents: 0,
+        latencyMs: 0,
+        finishReason: "budget_exceeded",
+      };
     }
     return {
       content: "All model candidates exhausted",
