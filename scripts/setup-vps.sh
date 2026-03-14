@@ -79,26 +79,49 @@ info "Service user: $INSTALL_USER:$INSTALL_GROUP"
 
 section "Checking prerequisites"
 
-# Node.js
+# Node.js — install via nvm if missing or too old
+install_node_via_nvm() {
+  info "Installing nvm + Node.js 22..."
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  # Source nvm into the current shell session
+  # shellcheck source=/dev/null
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  nvm install 22
+  nvm use 22
+  nvm alias default 22
+  # Persist nvm sourcing for future shells if not already in profile
+  for PROFILE in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc"; do
+    if [ -f "$PROFILE" ] && ! grep -q 'NVM_DIR' "$PROFILE" 2>/dev/null; then
+      cat >> "$PROFILE" <<'NVMEOF'
+
+# nvm (added by automaton setup)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+NVMEOF
+      break
+    fi
+  done
+  ok "Node.js $(node -v) installed via nvm"
+}
+
 if ! command -v node >/dev/null 2>&1; then
-  warn "Node.js not found. Attempting to install via NodeSource..."
-  if command -v apt-get >/dev/null 2>&1; then
-    curl -fsSL https://deb.nodesource.com/setup_22.x | $SUDO bash -
-    $SUDO apt-get install -y nodejs
-  elif command -v dnf >/dev/null 2>&1; then
-    curl -fsSL https://rpm.nodesource.com/setup_22.x | $SUDO bash -
-    $SUDO dnf install -y nodejs
-  elif command -v yum >/dev/null 2>&1; then
-    curl -fsSL https://rpm.nodesource.com/setup_22.x | $SUDO bash -
-    $SUDO yum install -y nodejs
-  else
-    die "Cannot install Node.js automatically. Please install Node.js >= 20 manually."
+  warn "Node.js not found — installing via nvm..."
+  install_node_via_nvm
+else
+  NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
+  if [ "$NODE_MAJOR" -lt 20 ]; then
+    warn "Node.js $(node -v) is too old (need >= 20) — upgrading via nvm..."
+    install_node_via_nvm
   fi
 fi
 
-NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))")
+# Re-check after potential nvm install
+NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.')[0]))" 2>/dev/null) \
+  || die "Node.js still not available after install. Open a new shell and re-run this script."
 if [ "$NODE_MAJOR" -lt 20 ]; then
-  die "Node.js >= 20 required, found $(node -v). Please upgrade."
+  die "Node.js $(node -v) is still < 20 after install attempt. Please resolve manually."
 fi
 ok "Node.js $(node -v)"
 
@@ -175,10 +198,29 @@ CONFIG_FILE="$HOME/.automaton/automaton.json"
 if [ "${NO_SETUP:-}" != "1" ] && [ ! -f "$CONFIG_FILE" ]; then
   section "First-time setup"
   echo ""
-  echo -e "${YELLOW}No configuration found. Running the setup wizard...${RESET}"
-  echo -e "${YELLOW}You will need your OpenRouter API key and a creator wallet address.${RESET}"
+  echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+  echo -e "${BOLD}${YELLOW}  🔑  Configuration required${RESET}"
+  echo -e "${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   echo ""
-  node dist/index.js --setup
+  echo -e "  Please have the following ready:"
+  echo -e "    ${BOLD}• OpenRouter API key${RESET}  — https://openrouter.ai/keys"
+  echo -e "    ${BOLD}• Creator wallet address${RESET} (optional — press Enter to skip)"
+  echo ""
+  echo -e "  Starting setup wizard..."
+  echo ""
+  # Redirect stdin from /dev/tty so interactive prompts work even when
+  # this script is being piped in via `curl ... | bash`
+  if [ -t 0 ]; then
+    node dist/index.js --setup
+  elif [ -e /dev/tty ]; then
+    node dist/index.js --setup < /dev/tty
+  else
+    warn "No interactive terminal available."
+    warn "Run 'node dist/index.js --setup' manually in $INSTALL_DIR before starting the service."
+    warn "Then run: sudo systemctl start $SERVICE_NAME"
+    # Don't start the service automatically — config is missing
+    export NO_START=1
+  fi
   ok "Setup complete"
 elif [ -f "$CONFIG_FILE" ]; then
   ok "Configuration found at $CONFIG_FILE — skipping wizard"
