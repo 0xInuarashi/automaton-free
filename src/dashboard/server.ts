@@ -58,14 +58,15 @@ export interface DashboardOptions {
   host: string;
   entryPoint: string;
   autoStart: boolean;
+  autoRestart?: boolean;
   envVars?: Record<string, string>;
 }
 
 export async function startDashboard(options: DashboardOptions): Promise<void> {
-  const { port, host, entryPoint, autoStart, envVars } = options;
+  const { port, host, entryPoint, autoStart, autoRestart = true, envVars } = options;
 
   // Create process manager
-  const processManager = new ProcessManager(entryPoint, envVars);
+  const processManager = new ProcessManager(entryPoint, envVars, autoRestart);
   const logBuffer = new LogRingBuffer(5000);
 
   // WebSocket clients for live log streaming

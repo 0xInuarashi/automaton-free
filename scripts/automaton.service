@@ -1,0 +1,58 @@
+# Automaton Dashboard — systemd service unit
+#
+# Install on a real Linux VM (not a container):
+#
+#   sudo cp scripts/automaton.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable automaton
+#   sudo systemctl start automaton
+#   sudo systemctl status automaton
+#   journalctl -u automaton -f
+#
+# Uninstall:
+#   sudo systemctl stop automaton
+#   sudo systemctl disable automaton
+#   sudo rm /etc/systemd/system/automaton.service
+
+[Unit]
+Description=Automaton Dashboard — Sovereign AI Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# Change User/Group to match your install user
+User=dev
+Group=dev
+
+# Change WorkingDirectory to your automaton installation path
+WorkingDirectory=/home/dev/git/ext/automaton
+
+# Change ExecStart to the actual path to node and dist/index.js
+ExecStart=/usr/bin/node /home/dev/git/ext/automaton/dist/index.js --dashboard
+
+# Environment
+Environment=DASHBOARD_PORT=3456
+Environment=DASHBOARD_HOST=0.0.0.0
+Environment=NODE_ENV=production
+# Uncomment to enable inference debug logging:
+# Environment=INFERENCE_DEBUG=1
+
+# Restart policy: always restart on crash or clean exit (agent exiting is normal)
+Restart=always
+RestartSec=5s
+
+# Log to journald (use: journalctl -u automaton -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automaton
+
+# Resource limits
+LimitNOFILE=65536
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target
