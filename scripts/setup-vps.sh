@@ -132,7 +132,16 @@ NODE_MAJOR=$(node -e "process.stdout.write(String(process.versions.node.split('.
 if [ "$NODE_MAJOR" -lt 20 ]; then
   die "Node.js $(node -v) is still < 20 after install attempt. Please resolve manually."
 fi
-ok "Node.js $(node -v)"
+
+# Pin a single Node binary for the rest of this script to avoid ABI mismatches
+NODE_BIN="$(command -v node)"
+NODE_DIR="$(dirname "$NODE_BIN")"
+export PATH="$NODE_DIR:$PATH"
+hash -r
+
+NODE_ABI="$(node -p 'process.versions.modules' 2>/dev/null || echo 'unknown')"
+ok "Node.js $(node -v) (ABI $NODE_ABI)"
+info "Using node binary: $NODE_BIN"
 
 # git
 if ! command -v git >/dev/null 2>&1; then
@@ -195,8 +204,23 @@ section "Building"
 info "Installing dependencies..."
 pnpm install --frozen-lockfile
 
-info "Rebuilding native addons for Node.js $(node -v)..."
+info "Rebuilding better-sqlite3 for Node.js $(node -v) (ABI $(node -p 'process.versions.modules'))..."
+pnpm rebuild better-sqlite3
+
+info "Rebuilding remaining native addons..."
 pnpm rebuild
+
+info "Verifying SQLite native binding ABI compatibility..."
+if ! "$NODE_BIN" -e "require('better-sqlite3')" >/dev/null 2>&1; then
+  warn "better-sqlite3 still mismatched for Node.js $("$NODE_BIN" -v). Retrying with a clean reinstall..."
+  rm -rf node_modules
+  pnpm install --frozen-lockfile
+  pnpm rebuild better-sqlite3
+  if ! "$NODE_BIN" -e "require('better-sqlite3')" >/dev/null 2>&1; then
+    die "better-sqlite3 is still ABI-incompatible with Node.js $("$NODE_BIN" -v)."
+  fi
+fi
+ok "SQLite native binding matches Node ABI"
 
 info "Building TypeScript..."
 pnpm run build
@@ -223,9 +247,9 @@ if [ "${NO_SETUP:-}" != "1" ] && [ ! -f "$CONFIG_FILE" ]; then
   # Redirect stdin from /dev/tty so interactive prompts work even when
   # this script is being piped in via `curl ... | bash`
   if [ -t 0 ]; then
-    node dist/index.js --setup
+    "$NODE_BIN" dist/index.js --setup
   elif [ -e /dev/tty ]; then
-    node dist/index.js --setup < /dev/tty
+    "$NODE_BIN" dist/index.js --setup < /dev/tty
   else
     warn "No interactive terminal available."
     warn "Run 'node dist/index.js --setup' manually in $INSTALL_DIR before starting the service."
@@ -242,7 +266,6 @@ fi
 
 # ─── 7. Find node binary path ─────────────────────────────────────
 
-NODE_BIN="$(command -v node)"
 ok "Node binary: $NODE_BIN"
 
 # ─── 8. Write systemd service ─────────────────────────────────────
