@@ -31,15 +31,11 @@ export class ProcessManager extends EventEmitter {
   private lastExitCode: number | null = null;
   private entryPoint: string;
   private envVars: Record<string, string>;
-  private autoRestart: boolean;
-  private restartTimer: ReturnType<typeof setTimeout> | null = null;
-  private stopping = false;
 
-  constructor(entryPoint: string, envVars: Record<string, string> = {}, autoRestart = false) {
+  constructor(entryPoint: string, envVars: Record<string, string> = {}) {
     super();
     this.entryPoint = entryPoint;
     this.envVars = envVars;
-    this.autoRestart = autoRestart;
   }
 
   start(): boolean {
@@ -47,7 +43,6 @@ export class ProcessManager extends EventEmitter {
       return false; // already running
     }
 
-    this.stopping = false;
     this.status = "starting";
     this.emit("status", this.status);
 
@@ -85,16 +80,6 @@ export class ProcessManager extends EventEmitter {
         this.emit("status", this.status);
         this.emit("exit", { code, signal });
         logger.info(`Automaton exited (code=${code}, signal=${signal})`);
-
-        // Auto-restart on crash unless we triggered the stop intentionally
-        if (this.autoRestart && !this.stopping) {
-          const delay = 5000;
-          logger.info(`Auto-restarting automaton in ${delay / 1000}s...`);
-          this.restartTimer = setTimeout(() => {
-            this.restartCount++;
-            this.start();
-          }, delay);
-        }
       });
 
       this.proc.on("error", (err) => {
@@ -117,12 +102,6 @@ export class ProcessManager extends EventEmitter {
   async stop(): Promise<boolean> {
     if (!this.proc || this.status !== "running") {
       return false;
-    }
-
-    this.stopping = true;
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer);
-      this.restartTimer = null;
     }
 
     this.status = "stopping";
