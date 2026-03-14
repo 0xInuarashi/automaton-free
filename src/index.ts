@@ -8,6 +8,7 @@
  */
 
 import { getWallet, getAutomatonDir } from "./identity/wallet.js";
+import { fileURLToPath } from "url";
 import { provision, loadApiKeyFromConfig } from "./identity/provision.js";
 import { loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
@@ -55,6 +56,7 @@ Sovereign AI Agent Runtime
 
 Usage:
   automaton --run          Start the automaton (first run triggers setup wizard)
+  automaton --dashboard    Start the web dashboard (includes process management)
   automaton --setup        Re-run the interactive setup wizard
   automaton --configure    Edit configuration (providers, model, treasury, general)
   automaton --pick-model   Interactively pick the active inference model
@@ -68,6 +70,8 @@ Environment:
   CONWAY_API_URL           Conway API URL (default: https://api.conway.tech)
   CONWAY_API_KEY           Conway API key (overrides config)
   OLLAMA_BASE_URL          Ollama base URL (overrides config, e.g. http://localhost:11434)
+  DASHBOARD_PORT           Dashboard port (default: 3456)
+  DASHBOARD_HOST           Dashboard host (default: 0.0.0.0)
 `);
     process.exit(0);
   }
@@ -118,8 +122,31 @@ Environment:
     process.exit(0);
   }
 
+  if (args.includes("--dashboard")) {
+    const { startDashboard } = await import("./dashboard/server.js");
+    const port = parseInt(process.env.DASHBOARD_PORT || "3456", 10);
+    const host = process.env.DASHBOARD_HOST || "0.0.0.0";
+    const autoStart = args.includes("--auto-start") || args.includes("--run");
+    const __filename = fileURLToPath(import.meta.url);
+    await startDashboard({
+      port,
+      host,
+      entryPoint: __filename,
+      autoStart,
+      envVars: {
+        INFERENCE_DEBUG: process.env.INFERENCE_DEBUG || "",
+        INFERENCE_RAW: process.env.INFERENCE_RAW || "",
+        OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || "",
+      },
+    });
+    return;
+  }
+
   if (args.includes("--run")) {
-    StructuredLogger.setSink(prettySink);
+    // Use pretty-print sink unless spawned by dashboard (FORCE_COLOR=0 signals machine consumption)
+    if (process.env.FORCE_COLOR !== "0") {
+      StructuredLogger.setSink(prettySink);
+    }
     await run();
     return;
   }
