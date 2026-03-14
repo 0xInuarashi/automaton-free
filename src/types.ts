@@ -42,6 +42,7 @@ export interface AutomatonConfig {
   conwayApiKey: string;
   openaiApiKey?: string;
   anthropicApiKey?: string;
+  openrouterApiKey?: string;
   ollamaBaseUrl?: string;
   inferenceModel: string;
   maxTokensPerTurn: number;
@@ -68,7 +69,7 @@ export interface AutomatonConfig {
 
 export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
   conwayApiUrl: "https://api.conway.tech",
-  inferenceModel: "gpt-5.2",
+  inferenceModel: "openrouter/hunter-alpha",
   maxTokensPerTurn: 4096,
   heartbeatConfigPath: "~/.automaton/heartbeat.yml",
   dbPath: "~/.automaton/state.db",
@@ -867,6 +868,7 @@ export interface TickContext {
   usdcBalance: number;               // fetched once per tick
   survivalTier: SurvivalTier;
   lowComputeMultiplier: number;      // from config
+  freeInferenceAvailable: boolean;   // true if free models exist in registry
   config: HeartbeatConfig;
   db: import("better-sqlite3").Database;
 }
@@ -1123,7 +1125,7 @@ export const DEFAULT_MEMORY_BUDGET: MemoryBudget = {
 
 // === Phase 2.3: Inference & Model Strategy Types ===
 
-export type ModelProvider = "openai" | "anthropic" | "conway" | "ollama" | "other";
+export type ModelProvider = "openai" | "anthropic" | "openrouter" | "conway" | "ollama" | "other";
 
 export type InferenceTaskType =
   | "agent_turn"
@@ -1226,9 +1228,9 @@ export interface ModelStrategyConfig {
 }
 
 export const DEFAULT_MODEL_STRATEGY_CONFIG: ModelStrategyConfig = {
-  inferenceModel: "gpt-5.2",
-  lowComputeModel: "gpt-5-mini",
-  criticalModel: "gpt-5-mini",
+  inferenceModel: "openrouter/hunter-alpha",
+  lowComputeModel: "stepfun/step-3.5-flash:free",
+  criticalModel: "arcee-ai/trinity-large-preview:free",
   maxTokensPerTurn: 4096,
   hourlyBudgetCents: 0,
   sessionBudgetCents: 0,

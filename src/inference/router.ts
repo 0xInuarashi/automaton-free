@@ -21,8 +21,10 @@ import type {
 import { ModelRegistry } from "./registry.js";
 import { InferenceBudgetTracker } from "./budget.js";
 import { DEFAULT_ROUTING_MATRIX, TASK_TIMEOUTS } from "./types.js";
+import { createLogger } from "../observability/logger.js";
 
 type Database = BetterSqlite3.Database;
+const logger = createLogger("router");
 
 export class InferenceRouter {
   private db: Database;
@@ -45,9 +47,9 @@ export class InferenceRouter {
   ): Promise<InferenceResult> {
     const { messages, taskType, tier, sessionId, turnId, tools } = request;
 
-    // 1. Select model from routing matrix
-    const model = this.selectModel(tier, taskType);
-    if (!model) {
+    // 1. Get all candidate models for this tier + task
+    const candidates = this.selectCandidates(tier, taskType);
+    if (candidates.length === 0) {
       return {
         content: "",
         model: "none",
@@ -61,6 +63,10 @@ export class InferenceRouter {
       };
     }
 
+    // Try each candidate model; fall back on provider errors (4xx/5xx)
+    let lastError: Error | null = null;
+    for (const model of candidates) {
+
     // 2. Estimate cost and check budget
     const estimatedTokens = messages.reduce((sum, m) => sum + (m.content?.length || 0) / 4, 0);
     const estimatedCostCents = Math.ceil(
@@ -70,32 +76,14 @@ export class InferenceRouter {
 
     const budgetCheck = this.budget.checkBudget(estimatedCostCents, model.modelId);
     if (!budgetCheck.allowed) {
-      return {
-        content: `Budget exceeded: ${budgetCheck.reason}`,
-        model: model.modelId,
-        provider: model.provider,
-        inputTokens: 0,
-        outputTokens: 0,
-        costCents: 0,
-        latencyMs: 0,
-        finishReason: "budget_exceeded",
-      };
+      continue; // Try next candidate
     }
 
     // 3. Check session budget
     if (request.sessionId && this.budget.config.sessionBudgetCents > 0) {
       const sessionCost = this.budget.getSessionCost(request.sessionId);
       if (sessionCost + estimatedCostCents > this.budget.config.sessionBudgetCents) {
-        return {
-          content: `Session budget exceeded: ${sessionCost}c spent + ${estimatedCostCents}c estimated > ${this.budget.config.sessionBudgetCents}c limit`,
-          model: model.modelId,
-          provider: model.provider,
-          inputTokens: 0,
-          outputTokens: 0,
-          costCents: 0,
-          latencyMs: 0,
-          finishReason: "budget_exceeded",
-        };
+        continue; // Try next candidate
       }
     }
 
@@ -127,7 +115,6 @@ export class InferenceRouter {
       }
     } catch (error: any) {
       const latencyMs = Date.now() - startTime;
-      // If fallback is enabled, try next candidate
       if (error.name === "AbortError") {
         return {
           content: `Inference timeout after ${timeout}ms`,
@@ -140,7 +127,10 @@ export class InferenceRouter {
           finishReason: "timeout",
         };
       }
-      throw error;
+      // Provider error — log and try next candidate
+      lastError = error;
+      logger.warn(`Model ${model.modelId} failed, trying next candidate: ${error.message}`);
+      continue;
     }
     const latencyMs = Date.now() - startTime;
 
@@ -178,6 +168,23 @@ export class InferenceRouter {
       latencyMs,
       toolCalls: response.toolCalls,
       finishReason: response.finishReason || "stop",
+    };
+
+    } // end candidate loop
+
+    // All candidates exhausted
+    if (lastError) {
+      throw lastError;
+    }
+    return {
+      content: "All model candidates exhausted",
+      model: "none",
+      provider: "other",
+      inputTokens: 0,
+      outputTokens: 0,
+      costCents: 0,
+      latencyMs: 0,
+      finishReason: "error",
     };
   }
 
@@ -230,6 +237,53 @@ export class InferenceRouter {
   }
 
   /**
+   * Get ALL eligible candidate models for a tier/task, in priority order.
+   * Used by the route() fallback loop to try alternatives on provider errors.
+   */
+  selectCandidates(tier: SurvivalTier, taskType: InferenceTaskType): ModelEntry[] {
+    const TIER_ORDER: Record<string, number> = {
+      dead: 0, critical: 1, low_compute: 2, normal: 3, high: 4,
+    };
+    const tierRank = TIER_ORDER[tier] ?? 0;
+    const seen = new Set<string>();
+    const result: ModelEntry[] = [];
+
+    // 1. Routing-matrix candidates
+    const preference = this.getPreference(tier, taskType);
+    if (preference && preference.candidates.length > 0) {
+      for (const candidateId of preference.candidates) {
+        if (seen.has(candidateId)) continue;
+        const entry = this.registry.get(candidateId);
+        if (entry && entry.enabled) {
+          result.push(entry);
+          seen.add(candidateId);
+        }
+      }
+    }
+
+    // 2. User-configured fallbacks
+    const strategy = this.budget.config;
+    const fallbackIds: (string | undefined)[] =
+      tier === "critical" || tier === "dead"
+        ? [strategy.criticalModel, strategy.inferenceModel, strategy.lowComputeModel]
+        : [strategy.inferenceModel, strategy.lowComputeModel, strategy.criticalModel];
+
+    for (const modelId of fallbackIds) {
+      if (!modelId || seen.has(modelId)) continue;
+      const entry = this.registry.get(modelId);
+      if (!entry || !entry.enabled) continue;
+      const isFree = entry.costPer1kInput === 0 && entry.costPer1kOutput === 0;
+      const tierOk = tierRank >= (TIER_ORDER[entry.tierMinimum] ?? 0);
+      if (isFree || tierOk) {
+        result.push(entry);
+        seen.add(modelId);
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Transform messages for a specific provider.
    * Handles Anthropic's alternating-role requirement.
    */
@@ -242,7 +296,7 @@ export class InferenceRouter {
       return this.fixAnthropicMessages(messages);
     }
 
-    // For OpenAI/Conway, merge consecutive same-role messages
+    // For OpenAI/Conway/OpenRouter, merge consecutive same-role messages
     return this.mergeConsecutiveSameRole(messages);
   }
 

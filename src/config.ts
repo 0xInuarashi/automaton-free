@@ -124,6 +124,7 @@ export function createConfig(params: {
   apiKey: string;
   openaiApiKey?: string;
   anthropicApiKey?: string;
+  openrouterApiKey?: string;
   ollamaBaseUrl?: string;
   parentAddress?: Address;
   treasuryPolicy?: TreasuryPolicy;
@@ -141,8 +142,9 @@ export function createConfig(params: {
     conwayApiKey: params.apiKey,
     openaiApiKey: params.openaiApiKey,
     anthropicApiKey: params.anthropicApiKey,
+    openrouterApiKey: params.openrouterApiKey,
     ollamaBaseUrl: params.ollamaBaseUrl,
-    inferenceModel: DEFAULT_CONFIG.inferenceModel || "gpt-5.2",
+    inferenceModel: DEFAULT_CONFIG.inferenceModel || "openrouter/hunter-alpha",
     maxTokensPerTurn: DEFAULT_CONFIG.maxTokensPerTurn || 4096,
     heartbeatConfigPath:
       DEFAULT_CONFIG.heartbeatConfigPath || "~/.automaton/heartbeat.yml",

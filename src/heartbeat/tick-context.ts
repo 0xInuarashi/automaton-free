@@ -66,6 +66,17 @@ export async function buildTickContext(
   const survivalTier = getSurvivalTier(creditBalance);
   const lowComputeMultiplier = config.lowComputeMultiplier ?? 4;
 
+  // Check if free inference models exist in the model registry
+  let freeInferenceAvailable = false;
+  try {
+    const row = db.prepare(
+      "SELECT COUNT(*) AS count FROM model_registry WHERE enabled = 1 AND cost_per_1k_input = 0 AND cost_per_1k_output = 0",
+    ).get() as { count: number } | undefined;
+    freeInferenceAvailable = (row?.count ?? 0) > 0;
+  } catch {
+    // model_registry table may not exist yet
+  }
+
   return {
     tickId,
     startedAt,
@@ -73,6 +84,7 @@ export async function buildTickContext(
     usdcBalance,
     survivalTier,
     lowComputeMultiplier,
+    freeInferenceAvailable,
     config,
     db,
   };

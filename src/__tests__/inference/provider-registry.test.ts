@@ -66,15 +66,17 @@ describe("ProviderRegistry", () => {
     const registry = ProviderRegistry.fromConfig(makeMissingPath());
 
     const providers = registry.getProviders();
-    expect(providers.length).toBe(4);
+    expect(providers.length).toBe(5);
     expect(providers.map((provider) => provider.id)).toEqual([
       "openai",
       "groq",
       "together",
+      "openrouter",
       "local",
     ]);
     expect(providers.find((provider) => provider.id === "openai")?.enabled).toBe(true);
     expect(providers.find((provider) => provider.id === "together")?.enabled).toBe(false);
+    expect(providers.find((provider) => provider.id === "openrouter")?.enabled).toBe(true);
   });
 
   it("fromConfig keeps defaults when JSON is invalid", () => {
@@ -83,7 +85,7 @@ describe("ProviderRegistry", () => {
     fs.writeFileSync(filePath, "{ not json", "utf8");
 
     const registry = ProviderRegistry.fromConfig(filePath);
-    expect(registry.getProviders().length).toBe(4);
+    expect(registry.getProviders().length).toBe(5);
     expect(registry.resolveModel("reasoning").provider.id).toBe("openai");
   });
 
@@ -144,7 +146,7 @@ describe("ProviderRegistry", () => {
     });
 
     const registry = ProviderRegistry.fromConfig(filePath);
-    expect(registry.getProviders().length).toBe(4);
+    expect(registry.getProviders().length).toBe(5);
   });
 
   it("fromConfig uses emergencyStopCredits from config", () => {
@@ -187,7 +189,7 @@ describe("ProviderRegistry", () => {
 
   it("resolveCandidates returns fallback order for reasoning tier", () => {
     const registry = createRegistryFromDefaults();
-    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openai", "groq"]);
+    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openai", "openrouter", "groq"]);
   });
 
   it("resolveCandidates skips providers disabled in config", () => {
@@ -258,10 +260,10 @@ describe("ProviderRegistry", () => {
     const registry = createRegistryFromDefaults();
 
     registry.disableProvider("openai", "manual", 60_000);
-    expect(providerIdsForTier(registry, "reasoning")).toEqual(["groq"]);
+    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openrouter", "groq"]);
 
     registry.enableProvider("openai");
-    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openai", "groq"]);
+    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openai", "openrouter", "groq"]);
   });
 
   it("disableProvider ignores unknown provider IDs", () => {
@@ -282,10 +284,10 @@ describe("ProviderRegistry", () => {
     const registry = createRegistryFromDefaults();
     registry.disableProvider("openai", "maintenance", 5_000);
 
-    expect(providerIdsForTier(registry, "reasoning")).toEqual(["groq"]);
+    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openrouter", "groq"]);
 
     vi.advanceTimersByTime(5_001);
-    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openai", "groq"]);
+    expect(providerIdsForTier(registry, "reasoning")).toEqual(["openai", "openrouter", "groq"]);
 
     vi.useRealTimers();
   });
@@ -401,6 +403,7 @@ describe("ProviderRegistry", () => {
     registry.resolveModel("reasoning");
     registry.resolveModel("fast");
 
-    expect(openAiCtor).toHaveBeenCalledTimes(4);
+    // Each tier resolves multiple candidates (preferred + fallbacks)
+    expect(openAiCtor.mock.calls.length).toBeGreaterThanOrEqual(4);
   });
 });

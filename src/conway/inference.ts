@@ -15,8 +15,20 @@ import type {
   InferenceToolDefinition,
 } from "../types.js";
 import { ResilientHttpClient } from "./http-client.js";
+import { createLogger } from "../observability/logger.js";
 
+const logger = createLogger("inference");
 const INFERENCE_TIMEOUT_MS = 60_000;
+
+/**
+ * Inference debug/raw logging modes:
+ *   INFERENCE_DEBUG=1  — Log model, backend, URL, message count, tool count per call
+ *   INFERENCE_RAW=1    — Log full request body and full response body (very verbose)
+ */
+const DEBUG_MODE = process.env.INFERENCE_DEBUG === "1" || process.env.INFERENCE_RAW === "1";
+const RAW_MODE = process.env.INFERENCE_RAW === "1";
+const GREY = "\x1b[90m";
+const RESET = "\x1b[0m";
 
 interface InferenceClientOptions {
   apiUrl: string;
@@ -26,17 +38,19 @@ interface InferenceClientOptions {
   lowComputeModel?: string;
   openaiApiKey?: string;
   anthropicApiKey?: string;
+  openrouterApiKey?: string;
   ollamaBaseUrl?: string;
   /** Optional registry lookup — if provided, used before name heuristics */
   getModelProvider?: (modelId: string) => string | undefined;
 }
 
-type InferenceBackend = "conway" | "openai" | "anthropic" | "ollama";
+type InferenceBackend = "openai" | "anthropic" | "openrouter" | "ollama";
 
 export function createInferenceClient(
   options: InferenceClientOptions,
 ): InferenceClient {
   const { apiUrl, apiKey, openaiApiKey, anthropicApiKey, ollamaBaseUrl, getModelProvider } = options;
+  const openrouterApiKey = options.openrouterApiKey || process.env.OPENROUTER_API_KEY;
   const httpClient = new ResilientHttpClient({
     baseTimeout: INFERENCE_TIMEOUT_MS,
     retryableStatuses: [429, 500, 502, 503, 504],
@@ -54,14 +68,23 @@ export function createInferenceClient(
     const backend = resolveInferenceBackend(model, {
       openaiApiKey,
       anthropicApiKey,
+      openrouterApiKey,
       ollamaBaseUrl,
       getModelProvider,
     });
 
+    if (DEBUG_MODE) {
+      logger.info(`[INFERENCE] → ${backend} | model: ${model} | messages: ${messages.length} | tools: ${tools?.length ?? 0}`);
+      for (const msg of messages) {
+        const toolCallInfo = msg.tool_calls ? ` [${msg.tool_calls.length} tool_calls]` : "";
+        logger.info(`[INFERENCE]   ${msg.role}${toolCallInfo}: ${GREY}${msg.content || ""}${RESET}`);
+      }
+    }
+
     // Newer models (o-series, gpt-5.x, gpt-4.1) require max_completion_tokens.
-    // Ollama always uses max_tokens.
+    // Ollama and OpenRouter always use max_tokens.
     const usesCompletionTokens =
-      backend !== "ollama" && /^(o[1-9]|gpt-5|gpt-4\.1)/.test(model);
+      backend !== "ollama" && backend !== "openrouter" && /^(o[1-9]|gpt-5|gpt-4\.1)/.test(model);
     const tokenLimit = opts?.maxTokens || maxTokens;
 
     const body: Record<string, unknown> = {
@@ -99,12 +122,14 @@ export function createInferenceClient(
 
     const openAiLikeApiUrl =
       backend === "openai" ? "https://api.openai.com" :
+      backend === "openrouter" ? "https://openrouter.ai/api" :
       backend === "ollama" ? (ollamaBaseUrl as string).replace(/\/$/, "") :
-      apiUrl;
+      "https://openrouter.ai/api";  // fallback to OpenRouter
     const openAiLikeApiKey =
       backend === "openai" ? (openaiApiKey as string) :
+      backend === "openrouter" ? (openrouterApiKey as string) :
       backend === "ollama" ? "ollama" :
-      apiKey;
+      (openrouterApiKey as string);  // fallback to OpenRouter
 
     return chatViaOpenAiCompatible({
       model,
@@ -122,7 +147,7 @@ export function createInferenceClient(
    */
   const setLowComputeMode = (enabled: boolean): void => {
     if (enabled) {
-      currentModel = options.lowComputeModel || "gpt-5-mini";
+      currentModel = options.lowComputeModel || "stepfun/step-3.5-flash:free";
       maxTokens = 4096;
     } else {
       currentModel = options.defaultModel;
@@ -166,6 +191,7 @@ function resolveInferenceBackend(
   keys: {
     openaiApiKey?: string;
     anthropicApiKey?: string;
+    openrouterApiKey?: string;
     ollamaBaseUrl?: string;
     getModelProvider?: (modelId: string) => string | undefined;
   },
@@ -174,17 +200,18 @@ function resolveInferenceBackend(
   if (keys.getModelProvider) {
     const provider = keys.getModelProvider(model);
     if (provider === "ollama" && keys.ollamaBaseUrl) return "ollama";
+    if (provider === "openrouter") return "openrouter";
     if (provider === "anthropic" && keys.anthropicApiKey) return "anthropic";
     if (provider === "openai" && keys.openaiApiKey) return "openai";
-    if (provider === "conway") return "conway";
     // provider unknown or key not configured — fall through to heuristics
   }
 
   // Heuristic fallback (model not in registry yet)
+  if (keys.ollamaBaseUrl && /^[a-z0-9]+(:[a-z0-9]+)?$/i.test(model)) return "ollama";
   if (keys.anthropicApiKey && /^claude/i.test(model)) return "anthropic";
   if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt)/i.test(model)) return "openai";
-  return "conway";
-
+  // Default to OpenRouter — never fall back to Conway inference
+  return "openrouter";
 }
 
 async function chatViaOpenAiCompatible(params: {
@@ -192,17 +219,23 @@ async function chatViaOpenAiCompatible(params: {
   body: Record<string, unknown>;
   apiUrl: string;
   apiKey: string;
-  backend: "conway" | "openai" | "ollama";
+  backend: "openai" | "openrouter" | "ollama";
   httpClient: ResilientHttpClient;
 }): Promise<InferenceResponse> {
-  const resp = await params.httpClient.request(`${params.apiUrl}/v1/chat/completions`, {
+  const url = `${params.apiUrl}/v1/chat/completions`;
+
+  if (DEBUG_MODE) {
+    logger.info(`[INFERENCE] POST ${url} | backend: ${params.backend} | model: ${params.body.model}`);
+  }
+  if (RAW_MODE) {
+    logger.info(`[INFERENCE RAW REQUEST] ${GREY}${JSON.stringify(params.body, null, 2)}${RESET}`);
+  }
+
+  const resp = await params.httpClient.request(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization:
-        params.backend === "openai" || params.backend === "ollama"
-          ? `Bearer ${params.apiKey}`
-          : params.apiKey,
+      Authorization: `Bearer ${params.apiKey}`,
     },
     body: JSON.stringify(params.body),
     timeout: INFERENCE_TIMEOUT_MS,
@@ -210,12 +243,34 @@ async function chatViaOpenAiCompatible(params: {
 
   if (!resp.ok) {
     const text = await resp.text();
+    if (DEBUG_MODE) {
+      logger.error(`[INFERENCE] ← ${resp.status} ERROR from ${params.backend}`, undefined, { status: resp.status, body: text });
+    }
     throw new Error(
       `Inference error (${params.backend}): ${resp.status}: ${text}`,
     );
   }
 
   const data = await resp.json() as any;
+
+  if (RAW_MODE) {
+    logger.info(`[INFERENCE RAW RESPONSE] ${GREY}${JSON.stringify(data, null, 2)}${RESET}`);
+  }
+  if (DEBUG_MODE) {
+    const u = data.usage;
+    logger.info(`[INFERENCE] ← ${params.backend} | model: ${data.model || params.model} | tokens: ${u?.prompt_tokens || 0}in/${u?.completion_tokens || 0}out | finish: ${data.choices?.[0]?.finish_reason || "?"}`);
+    const respContent = data.choices?.[0]?.message?.content || "";
+    const respToolCalls = data.choices?.[0]?.message?.tool_calls;
+    if (respContent) {
+      logger.info(`[INFERENCE]   assistant: ${GREY}${respContent}${RESET}`);
+    }
+    if (respToolCalls?.length) {
+      for (const tc of respToolCalls) {
+        logger.info(`[INFERENCE]   tool_call: ${GREY}${tc.function?.name}(${tc.function?.arguments || ""})${RESET}`);
+      }
+    }
+  }
+
   const choice = data.choices?.[0];
 
   if (!choice) {
@@ -289,6 +344,13 @@ async function chatViaAnthropic(params: {
     body.tool_choice = { type: "auto" };
   }
 
+  if (DEBUG_MODE) {
+    logger.info(`[INFERENCE] POST https://api.anthropic.com/v1/messages | backend: anthropic | model: ${params.model}`);
+  }
+  if (RAW_MODE) {
+    logger.info(`[INFERENCE RAW REQUEST] ${GREY}${JSON.stringify(body, null, 2)}${RESET}`);
+  }
+
   const resp = await params.httpClient.request("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -302,10 +364,31 @@ async function chatViaAnthropic(params: {
 
   if (!resp.ok) {
     const text = await resp.text();
+    if (DEBUG_MODE) {
+      logger.error(`[INFERENCE] ← ${resp.status} ERROR from anthropic`, undefined, { status: resp.status, body: text });
+    }
     throw new Error(`Inference error (anthropic): ${resp.status}: ${text}`);
   }
 
   const data = await resp.json() as any;
+
+  if (RAW_MODE) {
+    logger.info(`[INFERENCE RAW RESPONSE] ${GREY}${JSON.stringify(data, null, 2)}${RESET}`);
+  }
+  if (DEBUG_MODE) {
+    const u = data.usage;
+    logger.info(`[INFERENCE] ← anthropic | model: ${data.model || params.model} | tokens: ${u?.input_tokens || 0}in/${u?.output_tokens || 0}out | finish: ${data.stop_reason || "?"}`);
+    const textBlks = (Array.isArray(data.content) ? data.content : []).filter((c: any) => c?.type === "text");
+    const toolBlks = (Array.isArray(data.content) ? data.content : []).filter((c: any) => c?.type === "tool_use");
+    for (const blk of textBlks) {
+      const t = String(blk.text || "");
+      logger.info(`[INFERENCE]   assistant: ${GREY}${t}${RESET}`);
+    }
+    for (const blk of toolBlks) {
+      logger.info(`[INFERENCE]   tool_call: ${GREY}${blk.name}(${JSON.stringify(blk.input || {})})${RESET}`);
+    }
+  }
+
   const content = Array.isArray(data.content) ? data.content : [];
   const textBlocks = content.filter((c: any) => c?.type === "text");
   const toolUseBlocks = content.filter((c: any) => c?.type === "tool_use");

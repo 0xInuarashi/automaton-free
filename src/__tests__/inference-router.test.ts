@@ -741,15 +741,26 @@ describe("Static Model Baseline", () => {
     expect(ids).toContain("gpt-5.3");
   });
 
-  it("all models have positive pricing", () => {
+  it("all models have non-negative pricing", () => {
     for (const model of STATIC_MODEL_BASELINE) {
+      expect(model.costPer1kInput).toBeGreaterThanOrEqual(0);
+      expect(model.costPer1kOutput).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("paid models have positive pricing", () => {
+    const paidModels = STATIC_MODEL_BASELINE.filter(
+      (m) => m.costPer1kInput > 0 || m.costPer1kOutput > 0,
+    );
+    expect(paidModels.length).toBeGreaterThan(0);
+    for (const model of paidModels) {
       expect(model.costPer1kInput).toBeGreaterThan(0);
       expect(model.costPer1kOutput).toBeGreaterThan(0);
     }
   });
 
   it("all models have valid provider", () => {
-    const validProviders = ["openai", "anthropic", "conway", "other"];
+    const validProviders = ["openai", "anthropic", "openrouter", "conway", "ollama", "other"];
     for (const model of STATIC_MODEL_BASELINE) {
       expect(validProviders).toContain(model.provider);
     }

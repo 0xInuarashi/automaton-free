@@ -68,8 +68,9 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
 
     taskCtx.db.setKV("last_heartbeat_ping", JSON.stringify(payload));
 
-    // If critical or dead, record a distress signal
-    if (tier === "critical" || tier === "dead") {
+    // If critical or dead with no free inference available, record distress.
+    // With free OpenRouter models, zero credits is a normal starting state.
+    if ((tier === "critical" || tier === "dead") && !ctx.freeInferenceAvailable) {
       const distressPayload = {
         level: tier,
         name: taskCtx.config.name,
@@ -108,9 +109,9 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
 
     // Dead state escalation: if at zero credits (critical tier) for >1 hour,
     // transition to dead. This gives the agent time to receive funding before dying.
-    // USDC can't go negative, so dead is only reached via this timeout.
+    // Skip this when free inference is available — zero credits is the starting state.
     const DEAD_GRACE_PERIOD_MS = 3_600_000; // 1 hour
-    if (tier === "critical" && credits === 0) {
+    if (!ctx.freeInferenceAvailable && tier === "critical" && credits === 0) {
       const zeroSince = taskCtx.db.getKV("zero_credits_since");
       if (!zeroSince) {
         // First time seeing zero — start the grace period
@@ -157,7 +158,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     }));
 
     const MIN_TOPUP_USD = 5;
-    if (balance >= MIN_TOPUP_USD && (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")) {
+    if (!ctx.freeInferenceAvailable && balance >= MIN_TOPUP_USD && (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")) {
       // Cooldown: don't attempt more than once every 5 minutes to avoid
       // hammering the payment endpoint on repeated ticks.
       const AUTO_TOPUP_COOLDOWN_MS = 5 * 60 * 1000;

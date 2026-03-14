@@ -91,16 +91,22 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     console.log(chalk.yellow("  Warning: Anthropic keys usually start with sk-ant-. Saving anyway."));
   }
 
+  const openrouterApiKey = await promptOptional("OpenRouter API key (sk-or-..., optional)");
+  if (openrouterApiKey && !openrouterApiKey.startsWith("sk-or-")) {
+    console.log(chalk.yellow("  Warning: OpenRouter keys usually start with sk-or-. Saving anyway."));
+  }
+
   const ollamaInput = await promptOptional("Ollama base URL (http://localhost:11434, optional)");
   const ollamaBaseUrl = ollamaInput || undefined;
   if (ollamaBaseUrl) {
     console.log(chalk.green(`  Ollama URL saved: ${ollamaBaseUrl}`));
   }
 
-  if (openaiApiKey || anthropicApiKey || ollamaBaseUrl) {
+  if (openaiApiKey || anthropicApiKey || openrouterApiKey || ollamaBaseUrl) {
     const providers = [
       openaiApiKey ? "OpenAI" : null,
       anthropicApiKey ? "Anthropic" : null,
+      openrouterApiKey ? "OpenRouter" : null,
       ollamaBaseUrl ? "Ollama" : null,
     ].filter(Boolean).join(", ");
     console.log(chalk.green(`  Provider keys/URLs saved: ${providers}\n`));
@@ -156,6 +162,7 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     apiKey,
     openaiApiKey: openaiApiKey || undefined,
     anthropicApiKey: anthropicApiKey || undefined,
+    openrouterApiKey: openrouterApiKey || undefined,
     ollamaBaseUrl,
     treasuryPolicy,
   });

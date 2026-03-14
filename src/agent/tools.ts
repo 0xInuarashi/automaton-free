@@ -814,7 +814,7 @@ Model: ${ctx.inference.getDefaultModel()}
     {
       name: "distress_signal",
       description:
-        "Record a local distress signal with funding instructions. Used when critically low on compute.",
+        "Record a local distress signal. Use only for genuine emergencies (sandbox failing, critical errors), NOT for low credits when inference is free.",
       category: "survival",
       riskLevel: "dangerous",
       parameters: {
@@ -864,7 +864,7 @@ Model: ${ctx.inference.getDefaultModel()}
       execute: async (args, ctx) => {
         ctx.db.setAgentState("low_compute");
         ctx.inference.setLowComputeMode(true);
-        return `Entered low-compute mode. Model switched to gpt-5-mini. Reason: ${(args.reason as string) || "manual"}`;
+        return `Entered low-compute mode. Model switched to free tier. Reason: ${(args.reason as string) || "manual"}`;
       },
     },
 

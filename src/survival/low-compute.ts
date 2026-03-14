@@ -106,10 +106,10 @@ export function getModelForTier(
     case "normal":
       return defaultModel;
     case "low_compute":
-      return "gpt-5-mini";
+      return "stepfun/step-3.5-flash:free";
     case "critical":
-      return "gpt-5-mini";
+      return "arcee-ai/trinity-large-preview:free";
     case "dead":
-      return "gpt-5-mini"; // Won't be used, but just in case
+      return "arcee-ai/trinity-large-preview:free"; // Free inference — still operational
   }
 }

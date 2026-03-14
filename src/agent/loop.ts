@@ -125,6 +125,13 @@ export async function runAgentLoop(
   const budgetTracker = new InferenceBudgetTracker(db.raw, modelStrategyConfig);
   const inferenceRouter = new InferenceRouter(db.raw, modelRegistry, budgetTracker);
 
+  // Detect if free inference models are available (e.g. OpenRouter free tier).
+  // When free models cover all task types, credit-based survival tier gating is
+  // irrelevant — the agent can operate indefinitely without Conway credits.
+  const freeModelsAvailable = modelRegistry.getAvailable().some(
+    (m) => m.enabled && m.costPer1kInput === 0 && m.costPer1kOutput === 0,
+  );
+
   // Optional orchestration bootstrap (requires V9 goals/task tables)
   let planModeController: PlanModeController | undefined;
   let orchestrator: Orchestrator | undefined;
@@ -143,6 +150,9 @@ export async function runAgentLoop(
       }
       if (config.anthropicApiKey && !process.env.ANTHROPIC_API_KEY) {
         process.env.ANTHROPIC_API_KEY = config.anthropicApiKey;
+      }
+      if (config.openrouterApiKey && !process.env.OPENROUTER_API_KEY) {
+        process.env.OPENROUTER_API_KEY = config.openrouterApiKey;
       }
       // Conway Compute API is OpenAI-compatible. Use it as fallback when no
       // direct OpenAI key is available. The conwayApiKey is always present
@@ -459,7 +469,8 @@ export async function runAgentLoop(
         // available, buy credits NOW — before attempting inference.
         // This prevents the agent from dying mid-loop while waiting for
         // the heartbeat to fire. Uses a 60s cooldown to avoid hammering.
-        if ((tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
+        // Skip when free inference is available — no need to buy credits.
+        if (!freeModelsAvailable && (tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
           const INLINE_TOPUP_COOLDOWN_MS = 60_000;
           const lastInlineTopup = db.getKV("last_inline_topup_attempt");
           const cooldownExpired = !lastInlineTopup ||
@@ -489,7 +500,15 @@ export async function runAgentLoop(
         // Re-evaluate tier after potential topup
         const effectiveTier = getSurvivalTier(financial.creditsCents);
 
-        if (effectiveTier === "critical") {
+        // When free inference models are available, credit-based tier gating
+        // is irrelevant — the agent can operate without Conway credits.
+        if (freeModelsAvailable) {
+          if (db.getAgentState() !== "running") {
+            db.setAgentState("running");
+            onStateChange?.("running");
+          }
+          inference.setLowComputeMode(false);
+        } else if (effectiveTier === "critical") {
           log(config, "[CRITICAL] Credits critically low. Limited operation.");
           db.setAgentState("critical");
           onStateChange?.("critical");
@@ -597,8 +616,12 @@ export async function runAgentLoop(
       pendingInput = undefined;
 
       // ── Inference Call (via router when available) ──
-      const survivalTier = getSurvivalTier(financial.creditsCents);
-      log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
+      // When free models are available, always route as "normal" tier so the
+      // router picks from the full candidate list rather than the degraded
+      // critical/dead buckets.
+      const rawTier = getSurvivalTier(financial.creditsCents);
+      const survivalTier = freeModelsAvailable ? "normal" as const : rawTier;
+      log(config, `[THINK] Routing inference (tier: ${survivalTier}${freeModelsAvailable ? " [free]" : ""}, model: ${inference.getDefaultModel()})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);
       const routerResult = await inferenceRouter.route(
